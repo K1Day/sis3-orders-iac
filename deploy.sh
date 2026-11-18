@@ -13,11 +13,14 @@ PREFIX="sis3-${ENV_NAME}"
 ECR_STACK="${PREFIX}-ecr"
 APP_STACK="${PREFIX}-app"
 cd "$(dirname "$0")"
+# optional: role CloudFormation uses to create resources (set by the GitHub workflow)
+ROLE_ARGS=${CFN_ROLE_ARN:+--role-arn $CFN_ROLE_ARN}
 
 echo "== [1/3] ECR repository stack: $ECR_STACK"
 aws cloudformation deploy --region "$REGION" \
   --stack-name "$ECR_STACK" \
   --template-file infra/ecr.yaml \
+  $ROLE_ARGS \
   --no-fail-on-empty-changeset
 
 REPO_URI=$(aws cloudformation describe-stacks --region "$REGION" --stack-name "$ECR_STACK" \
@@ -45,9 +48,11 @@ aws cloudformation deploy --region "$REGION" \
   --template-file infra/app.yaml \
   --capabilities CAPABILITY_IAM \
   --parameter-overrides EnvName="$ENV_NAME" ImageUri="$IMAGE" \
+  $ROLE_ARGS \
   --no-fail-on-empty-changeset
 
 echo
 echo "== Done. Outputs:"
 aws cloudformation describe-stacks --region "$REGION" --stack-name "$APP_STACK" \
   --query "Stacks[0].Outputs[].[OutputKey,OutputValue]" --output table
+  
