@@ -66,3 +66,5 @@ SNS, SQS, Lambda, DynamoDB and CloudWatch Logs (simplest for a lab account: `Adm
 Region: `us-east-1` (change with `export AWS_REGION=...`).
 
 Cost: ~$0.03–0.05/hour while running (ALB + 1 small Fargate task). Run `destroy.sh` after the demo.
+
+Practice 7: CI/CD test
