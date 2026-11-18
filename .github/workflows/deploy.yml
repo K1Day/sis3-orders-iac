@@ -1,0 +1,56 @@
+name: deploy
+ 
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+ 
+permissions:
+  contents: read
+ 
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+ 
+jobs:
+  test:
+    # runs before any AWS credentials exist: a failing test never touches the account
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install tools
+        run: pip install cfn-lint boto3
+      - name: Lint CloudFormation templates
+        run: cfn-lint infra/*.yaml
+      - name: Check scripts and app
+        run: |
+          bash -n deploy.sh && bash -n destroy.sh
+          python -m py_compile app/app.py
+      - name: Smoke test the API locally
+        run: |
+          python app/app.py &
+          sleep 2
+          curl -fsS localhost:8080/health
+          curl -fsS localhost:8080/
+ 
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production # OIDC sub becomes ...:environment:production
+    permissions:
+      id-token: write # required for OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Build, push (tag = commit SHA) and deploy the SIS 3 stacks
+        env:
+          CFN_ROLE_ARN: ${{ vars.CFN_ROLE_ARN }}
+        run: bash deploy.sh dev
+ 
