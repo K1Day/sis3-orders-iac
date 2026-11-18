@@ -1,0 +1,127 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Practice 7 - lets GitHub Actions deploy SIS 3 without access keys (OIDC).
+  Deployed once by hand. Creates the GitHub OIDC provider, a deploy role that only
+  this repo's "production" environment can assume, and the role CloudFormation uses
+  to create the SIS 3 resources.
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Default: K1Day
+  GitHubOwnerId:
+    Type: String
+    Description: Numeric owner ID (curl https://api.github.com/repos/OWNER/REPO -> .owner.id)
+    AllowedPattern: "^[0-9]+$"
+  GitHubRepo:
+    Type: String
+    Default: sis3-orders-iac
+  GitHubRepoId:
+    Type: String
+    Description: Numeric repository ID (-> .id)
+    AllowedPattern: "^[0-9]+$"
+  GitHubEnvironment:
+    Type: String
+    Default: production
+  CreateOidcProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: "false if token.actions.githubusercontent.com already exists in this account"
+
+Conditions:
+  MakeProvider: !Equals [!Ref CreateOidcProvider, "true"]
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: MakeProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+
+  # Role that CloudFormation itself uses to create the stack resources (VPC, ECS, roles...).
+  CfnExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Used by CloudFormation to create the SIS 3 stacks
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudformation.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess # lab shortcut, see report
+
+  # Role the GitHub workflow assumes. It cannot create resources itself:
+  # it can only push images and run CloudFormation with CfnExecutionRole.
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Assumed by GitHub Actions (OIDC) to deploy SIS 3
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRoleWithWebIdentity
+            Principal:
+              Federated: !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                # immutable subject format (repos created after 15 July 2026)
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOwner}@${GitHubOwnerId}/${GitHubRepo}@${GitHubRepoId}:environment:${GitHubEnvironment}"
+      Policies:
+        - PolicyName: deploy-sis3
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CloudFormationOnSis3Stacks
+                Effect: Allow
+                Action: cloudformation:*
+                Resource:
+                  - !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/sis3-*/*"
+                  - !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/*/*"
+              - Sid: CloudFormationRead
+                Effect: Allow
+                Action:
+                  - cloudformation:ValidateTemplate
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ListStacks
+                Resource: "*"
+              - Sid: PassOnlyTheCfnRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt CfnExecutionRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+              - Sid: EcrLogin
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: EcrPushSis3
+                Effect: Allow
+                Action:
+                  - ecr:DescribeImages
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                Resource: !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/sis3-*"
+
+Outputs:
+  DeployRoleArn:
+    Description: Put into the GitHub repo variable DEPLOY_ROLE_ARN
+    Value: !GetAtt GitHubDeployRole.Arn
+  CfnExecutionRoleArn:
+    Description: Put into the GitHub repo variable CFN_ROLE_ARN
+    Value: !GetAtt CfnExecutionRole.Arn
+  TrustedSubject:
+    Value: !Sub "repo:${GitHubOwner}@${GitHubOwnerId}/${GitHubRepo}@${GitHubRepoId}:environment:${GitHubEnvironment}"
